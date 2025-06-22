@@ -6,6 +6,6 @@
 #include "types.h"
 
 TEST(Test, TestLevel3Ob) {
-    auto ob = L3Book{};
+    SmartL3Book ob(nullptr);
     ob.Add(1, true, 2, 123);
 }

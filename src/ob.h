@@ -2,6 +2,7 @@
 
 #include "stream_msg.h"
 #include <cassert>
+#include <optional>
 #include <types.h>
 #include <variant>
 
@@ -25,33 +26,37 @@ using OneSideBook = std::map<double, LevelType, Comparator>;
 //     OneSideBook<L2PriceLevel, AskComparator> asks;
 // };
 
-struct L3Book {
-    OneSideBook<L3PriceLevel, BidComparator> bids;
-    OneSideBook<L3PriceLevel, AskComparator> asks;
+template <typename LevelType> struct L3BookImpl {
+    OneSideBook<LevelType, BidComparator> bids;
+    OneSideBook<LevelType, AskComparator> asks;
     std::unordered_map<int, std::list<Order>::iterator> orderMap;
 
-    // void ProcessMsg(const Level3 &msg) {
-    //     // Process the Level 3 message and update the L3 book accordingly
-    //     std::visit(
-    //         [this](auto &&arg) {
-    //             using T = std::decay_t<decltype(arg)>;
-    //             if constexpr (std::is_same_v<T, level3::Execute>) {
-    //                 Execute(arg.order_id, arg.size > 0, arg.size);
-    //             } else if constexpr (std::is_same_v<T, level3::Modify>) {
-    //                 Cancel(arg.order_id, arg.is_buy, 0);
-    //                 Add(arg.order_id, arg.is_buy, arg.size, arg.price);
-    //             } else if constexpr (std::is_same_v<T, level3::Add>) {
-    //                 Add(arg.order_id, arg.is_buy, arg.size, arg.price);
-    //             } else if constexpr (std::is_same_v<T, level3::Cancel>) {
-    //                 Cancel(arg.order_id, arg.is_buy, 0);
-    //             } else {
-    //                 assert(false && "Unknown message type");
-    //             }
-    //         },
-    //         msg.msg);
-    // }
+    template <typename Func>
+    void ProcessMsg(const Level3 &msg, Func &&callback) {
+        // Process the Level 3 message and update the L3 book accordingly
+        std::visit(
+            [this, callback](auto &&arg) {
+                using T = std::decay_t<decltype(arg)>;
+                if constexpr (std::is_same_v<T, level3::Execute>) {
+                    auto l = Execute(arg.order_id, arg.size > 0, arg.size);
+                    if (l) calback(*l);
+                } else if constexpr (std::is_same_v<T, level3::Modify>) {
+                    auto l = Cancel(arg.order_id, arg.is_buy, 0);
+                    if (l) callback(*l);
+                    callback(Add(arg.order_id, arg.is_buy, arg.size, arg.price));
+                } else if constexpr (std::is_same_v<T, level3::Add>) {
+                    callback(Add(arg.order_id, arg.is_buy, arg.size, arg.price));
+                } else if constexpr (std::is_same_v<T, level3::Cancel>) {
+                    auto l = Cancel(arg.order_id, arg.is_buy, 0);
+                    if (l) callback(*l);
+                } else {
+                    assert(false && "Unknown message type");
+                }
+            },
+            msg.msg);
+    }
 
-    L3PriceLevel &GetOrAddLevel(bool is_bid, double price) {
+    LevelType &GetOrAddLevel(bool is_bid, double price) {
         if (is_bid) {
             auto it = bids.find(price);
             if (it == bids.end()) {
@@ -82,53 +87,59 @@ struct L3Book {
         assert(erased);
     }
 
-    void Add(int order_id, bool isSell, int size, double price) {
+    LevelType &Add(int order_id, bool isSell, int size, double price) {
         Order order{order_id, isSell, size, price};
         auto &level = GetOrAddLevel(order.is_buy, order.price);
         level.qty += order.size; // Adjust size
         level.numOrders++;
         level.orders.push_back(order);                  // Add order to the list
         orderMap[order.orderId] = --level.orders.end(); // Store iterator in map
+        return level;
     }
 
-    void Execute(int order_id, bool is_bid, int exec_size) {
+    std::optional<LevelType &> Execute(int order_id, bool is_bid,
+                                       int exec_size) {
         // Execute an order in the L3 book
         auto it = orderMap.find(order_id);
-
-        if (it != orderMap.end()) {
-            auto &orderIt = it->second;
-            assert(is_bid == orderIt->is_buy);
-            auto new_size = orderIt->size - exec_size;
-            assert(new_size >= 0);
-            Cancel(order_id, is_bid, new_size);
+        if (it == orderMap.end()) {
+            return std::nullopt; // Order not found
         }
+
+        auto &orderIt = it->second;
+        assert(is_bid == orderIt->is_buy);
+        auto new_size = orderIt->size - exec_size;
+        assert(new_size >= 0);
+        return Cancel(order_id, is_bid, new_size);
     }
 
-    void Cancel(int order_id, bool is_bid, int new_size) {
+    std::optional<LevelType &> Cancel(int order_id, bool is_bid, int new_size) {
         auto it = orderMap.find(order_id);
-
-        if (it != orderMap.end()) {
-            auto &orderIt = it->second;
-            assert(is_bid == orderIt->is_buy);
-            auto price = orderIt->price;
-            auto &level = GetOrAddLevel(is_bid, price);
-
-            level.qty += new_size - orderIt->size;
-            orderIt->size = new_size;
-
-            if (orderIt->size == 0) {
-                // Remove the order if size is zero
-                level.numOrders--;
-                level.orders.erase(orderIt);
-                orderMap.erase(it);
-
-                assert(level.qty >= 0);
-
-                // if (level.qty == 0) {
-                //     RemoveLevel(is_bid, price);
-                // }
-
-            }
+        if (it == orderMap.end()) {
+            return std::nullopt; // Order not found
         }
+
+        auto &orderIt = it->second;
+        assert(is_bid == orderIt->is_buy);
+        auto price = orderIt->price;
+        auto &level = GetOrAddLevel(is_bid, price);
+
+        level.qty += new_size - orderIt->size;
+        orderIt->size = new_size;
+
+        if (orderIt->size == 0) {
+            // Remove the order if size is zero
+            level.numOrders--;
+            level.orders.erase(orderIt);
+            orderMap.erase(it);
+
+            assert(level.qty >= 0);
+
+            // if (level.qty == 0) {
+            //     RemoveLevel(is_bid, price);
+            // }
+        }
+        return level;
     }
 };
+
+using L3Book = L3BookImpl<L3PriceLevel>;

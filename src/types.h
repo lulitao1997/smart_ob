@@ -17,6 +17,7 @@ struct Order {
 };
 
 struct L3PriceLevel {
+    bool is_bid;
     double price;
     int qty;
     int numOrders;

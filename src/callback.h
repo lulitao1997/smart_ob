@@ -1,14 +1,22 @@
 
 
+class SmartL3Book;
+struct OrderInfo {
+    int order_id;
+    bool is_buy;
+    int size;
+    double price;
+};
+
 struct SmartObCallback {
     virtual ~SmartObCallback() = default;
 
-    virtual void onOrderAdd(OrderBook &smartOrderBook,
+    virtual void onOrderAdd(const SmartL3Book &smartOrderBook,
                             const OrderInfo &orderInfo) {};
-    virtual void onOrderCancel(OrderBook &smartOrderBook,
+    virtual void onOrderCancel(const SmartL3Book &smartOrderBook,
                                const OrderInfo &orderInfo) {};
-    virtual void onOrderModify(OrderBook &smartOrderBook,
+    virtual void onOrderModify(const SmartL3Book &smartOrderBook,
                                const OrderInfo &orderInfo) {};
-    virtual void onOrderExecution(OrderBook &smartOrderBook,
+    virtual void onOrderExecution(const SmartL3Book &smartOrderBook,
                                   const OrderInfo &orderInfo) {};
 };
