@@ -21,11 +21,6 @@ struct AskComparator {
 template <typename LevelType, typename Comparator>
 using OneSideBook = std::map<double, LevelType, Comparator>;
 
-// struct L2Book {
-//     OneSideBook<L2PriceLevel, BidComparator> bids;
-//     OneSideBook<L2PriceLevel, AskComparator> asks;
-// };
-
 template <typename LevelType> struct L3BookImpl {
     OneSideBook<LevelType, BidComparator> bids;
     OneSideBook<LevelType, AskComparator> asks;
@@ -39,16 +34,21 @@ template <typename LevelType> struct L3BookImpl {
                 using T = std::decay_t<decltype(arg)>;
                 if constexpr (std::is_same_v<T, level3::Execute>) {
                     auto l = Execute(arg.order_id, arg.size > 0, arg.size);
-                    if (l) calback(*l);
+                    if (l)
+                        callback(*l);
                 } else if constexpr (std::is_same_v<T, level3::Modify>) {
                     auto l = Cancel(arg.order_id, arg.is_buy, 0);
-                    if (l) callback(*l);
-                    callback(Add(arg.order_id, arg.is_buy, arg.size, arg.price));
+                    if (l)
+                        callback(*l);
+                    callback(
+                        Add(arg.order_id, arg.is_buy, arg.size, arg.price));
                 } else if constexpr (std::is_same_v<T, level3::Add>) {
-                    callback(Add(arg.order_id, arg.is_buy, arg.size, arg.price));
+                    callback(
+                        Add(arg.order_id, arg.is_buy, arg.size, arg.price));
                 } else if constexpr (std::is_same_v<T, level3::Cancel>) {
                     auto l = Cancel(arg.order_id, arg.is_buy, 0);
-                    if (l) callback(*l);
+                    if (l)
+                        callback(*l);
                 } else {
                     assert(false && "Unknown message type");
                 }
@@ -61,6 +61,7 @@ template <typename LevelType> struct L3BookImpl {
             auto it = bids.find(price);
             if (it == bids.end()) {
                 auto &l = bids[price];
+                l.is_bid = is_bid;
                 l.price = price;
                 return l;
             }
@@ -69,6 +70,7 @@ template <typename LevelType> struct L3BookImpl {
             auto it = asks.find(price);
             if (it == asks.end()) {
                 auto &l = asks[price];
+                l.is_bid = is_bid;
                 l.price = price;
                 return l;
             }
@@ -97,12 +99,12 @@ template <typename LevelType> struct L3BookImpl {
         return level;
     }
 
-    std::optional<LevelType &> Execute(int order_id, bool is_bid,
+    LevelType *Execute(int order_id, bool is_bid,
                                        int exec_size) {
         // Execute an order in the L3 book
         auto it = orderMap.find(order_id);
         if (it == orderMap.end()) {
-            return std::nullopt; // Order not found
+            return nullptr; // Order not found
         }
 
         auto &orderIt = it->second;
@@ -112,10 +114,10 @@ template <typename LevelType> struct L3BookImpl {
         return Cancel(order_id, is_bid, new_size);
     }
 
-    std::optional<LevelType &> Cancel(int order_id, bool is_bid, int new_size) {
+    LevelType *Cancel(int order_id, bool is_bid, int new_size) {
         auto it = orderMap.find(order_id);
         if (it == orderMap.end()) {
-            return std::nullopt; // Order not found
+            return nullptr; // Order not found
         }
 
         auto &orderIt = it->second;
@@ -138,7 +140,7 @@ template <typename LevelType> struct L3BookImpl {
             //     RemoveLevel(is_bid, price);
             // }
         }
-        return level;
+        return &level;
     }
 };
 

@@ -21,13 +21,13 @@ struct Execute {
 
 struct Cancel {
     int order_id; // Order ID
+    bool is_buy;
 };
 
 // size=0 means cancel
 // Modify = Cancel + Add
 struct Modify {
     int order_id; // Order ID
-    int new_order_id; // New order ID
     bool is_buy;
     int size;     // New size of the order
     double price; // New price of the order
@@ -43,7 +43,7 @@ struct Add {
 
 struct Level3 {
     int seq_id;
-    std::variant<level3::Execute, level3::Modify, level3::Add> msg;
+    std::variant<level3::Execute, level3::Modify, level3::Cancel, level3::Add> msg;
 };
 
 

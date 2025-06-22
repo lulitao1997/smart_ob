@@ -7,6 +7,7 @@
 #include <limits>
 #include <ob.h>
 #include <stream_msg.h>
+#include <string>
 #include <types.h>
 
 const double EXEC_RATIO =
@@ -29,19 +30,70 @@ struct L3SmartPriceLevel : L3PriceLevel {
         }
     }
 
-    // template <typename Func> void ForEachEstimatedOrders(Func &&func) {
-    //     // estimated canceled qty from all the unconfirmed trades
-    //     int unconfirmed_canceled_qty =
-    //         std::clamp(int(total_unconfirmed_trade_qty * (1 - EXEC_RATIO) /
-    //         EXEC_RATIO), 0,
-    //                    l2_qty - total_unconfirmed_trade_qty - 1);
-    //     for (auto &order : orders) {
-    //         if (unconfirmed_canceled_qty < order.size) func(order);
-    //         else {
-    //             unconfirmed_canceled_qty -= order.size;
-    //         }
-    //     }
-    // }
+    std::vector<Order> GetOrders() const {
+        std::vector<Order> orders;
+        // cancel orders at the front
+        int should_cancel_qty = std::max(0, qty - l2_qty);
+        for (const auto &order : this->orders) {
+            if (order.size > should_cancel_qty) {
+                auto order_cpy = order;
+                order_cpy.size -= should_cancel_qty;
+                orders.push_back(order_cpy);
+                should_cancel_qty = 0;
+            } else {
+                should_cancel_qty -= order.size;
+            }
+        }
+        if (qty > l2_qty) {
+            int guessed_qty = qty - l2_qty;
+            Order guessed_order{0, is_bid, guessed_qty, price};
+            orders.push_back(guessed_order);
+        }
+
+        // remove the trades from behind
+        auto trade_remaining_qty =
+            total_unconfirmed_trade_qty;
+        while (!orders.empty() && trade_remaining_qty > 0) {
+            if (orders.back().size <= total_unconfirmed_trade_qty) {
+                trade_remaining_qty -= orders.back().size;
+                orders.pop_back();
+            } else {
+                orders.back().size -= trade_remaining_qty;
+                break; // no more trades to remove
+            }
+        }
+        return orders;
+    }
+
+    std::string ToString() const {
+        std::string result = std::to_string(price);
+        result += ":[";
+        for (const auto &order : orders) {
+            result += std::to_string(order.size) + '@' + std::to_string(order.orderId);
+        }
+        result += "]";
+        return result;
+    }
+
+    void DebugCheck() const {
+        int l3_total_qty = 0;
+        for (const auto &order : orders) {
+            assert(order.price == price);
+            assert(order.is_buy == is_bid);
+            l3_total_qty += order.size;
+        }
+        assert(l3_total_qty == qty);
+
+        int guessed_total_qty = 0;
+        auto guess_orders = GetOrders();
+        for (const auto &order : guess_orders) {
+            assert(order.price == price);
+            assert(order.is_buy == is_bid);
+            guessed_total_qty += order.size;
+        }
+        assert(l2_qty - total_unconfirmed_trade_qty < 0 ||
+               l2_qty - total_unconfirmed_trade_qty == guessed_total_qty);
+    }
 };
 
 struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
@@ -144,8 +196,8 @@ struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
                                              arg.price});
                     } else if constexpr (std::is_same_v<T, level3::Modify>) {
                         callback->onOrderModify(
-                            *this,
-                            OrderInfo{arg.order_id, arg.is_buy, arg.size, arg.price});
+                            *this, OrderInfo{arg.order_id, arg.is_buy, arg.size,
+                                             arg.price});
                     } else if constexpr (std::is_same_v<T, level3::Add>) {
                         callback->onOrderAdd(*this,
                                              OrderInfo{arg.order_id, arg.is_buy,
@@ -153,7 +205,7 @@ struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
                     } else if constexpr (std::is_same_v<T, level3::Cancel>) {
                         callback->onOrderCancel(
                             *this,
-                            OrderInfo{arg.order_id, arg.is_buy, 0, arg.price});
+                            OrderInfo{arg.order_id, arg.is_buy, 0, 0});
                     } else {
                         assert(false && "Unknown message type");
                     }
@@ -168,7 +220,6 @@ struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
     void ReconcileL3(int seq_id, L3SmartPriceLevel &level) {
         if (last_l2_seq_id <= seq_id) {
             level.l2_qty = level.qty;
-            last_l2_seq_id = seq_id;
             level.PopUnconfirmedTradesBefore(seq_id);
             if (level.qty == 0) {
                 RemoveLevel(level.is_bid, level.price);
@@ -184,7 +235,9 @@ struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
                     if (p <= price)
                         break;
                     for (auto &order : l.orders) {
-                        // OnOrderCancel(order.size, p, true);
+                        callback->onOrderCancel(
+                            *this, OrderInfo{order.orderId, order.is_buy,
+                                             order.size, p});
                     }
                 }
 
@@ -199,7 +252,9 @@ struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
                     if (p >= price)
                         break;
                     for (auto &order : l.orders) {
-                        // OnOrderCancel(order.size, p, true);
+                        callback->onOrderCancel(
+                            *this, OrderInfo{order.orderId, order.is_buy,
+                                             order.size, p});
                     }
                 }
 
@@ -225,6 +280,29 @@ struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
         level.unconfirmed_trades.push_back(trade);
         level.total_unconfirmed_trade_qty += trade.size;
         (trade.is_buy ? last_trade_bid_id : last_trade_ask_id) = trade.seq_id;
+    }
+
+    std::string ToString() const {
+        std::string result;
+        result += "BID:\n";
+        for (const auto &[price, level] : bids) {
+            result += level.ToString() + "\n";
+        }
+        result += "ASK:\n";
+        for (const auto &[price, level] : asks) {
+            result += level.ToString() + "\n";
+        }
+        return result;
+    }
+
+    void DebugCheck() const {
+        for (const auto &[price, level] : bids) {
+            level.DebugCheck();
+        }
+        for (const auto &[price, level] : asks) {
+            level.DebugCheck();
+        }
+        assert(!bids.empty() || !asks.empty() || bids.begin()->first < asks.begin()->first);
     }
 
   private:

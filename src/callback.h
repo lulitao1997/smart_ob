@@ -1,6 +1,6 @@
 
 
-class SmartL3Book;
+struct SmartL3Book;
 struct OrderInfo {
     int order_id;
     bool is_buy;
