@@ -17,8 +17,8 @@ struct Order {
 };
 
 struct L3PriceLevel {
-    // double price;
-    int quantity;
+    double price;
+    int qty;
     int numOrders;
     std::list<Order> orders;
 };
