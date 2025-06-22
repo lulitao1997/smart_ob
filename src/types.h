@@ -6,7 +6,7 @@
 
 struct L2PriceLevel {
     double price;
-    int quantity;
+    int qty;
 };
 
 struct Order {
@@ -21,5 +21,6 @@ struct L3PriceLevel {
     double price;
     int qty;
     int numOrders;
+    // orders at the back of the list are the most recent
     std::list<Order> orders;
 };

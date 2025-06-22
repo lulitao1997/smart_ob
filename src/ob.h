@@ -33,7 +33,7 @@ template <typename LevelType> struct L3BookImpl {
             [this, callback](auto &&arg) {
                 using T = std::decay_t<decltype(arg)>;
                 if constexpr (std::is_same_v<T, level3::Execute>) {
-                    auto l = Execute(arg.order_id, arg.size > 0, arg.size);
+                    auto l = Execute(arg.order_id, arg.is_buy, arg.size);
                     if (l)
                         callback(*l);
                 } else if constexpr (std::is_same_v<T, level3::Modify>) {
@@ -79,14 +79,22 @@ template <typename LevelType> struct L3BookImpl {
     }
 
     void RemoveLevel(bool is_bid, double price) {
-        bool erased = false;
         if (is_bid) {
-            erased = bids.erase(price);
+            auto it = bids.find(price);
+            assert(it != bids.end());
+            for (auto &order : it->second.orders) {
+                orderMap.erase(order.orderId);
+            }
+            bids.erase(price);
 
         } else {
-            erased = asks.erase(price);
+            auto it = asks.find(price);
+            assert(it != asks.end());
+            for (auto &order : it->second.orders) {
+                orderMap.erase(order.orderId);
+            }
+            asks.erase(it);
         }
-        assert(erased);
     }
 
     LevelType &Add(int order_id, bool isSell, int size, double price) {

@@ -16,7 +16,6 @@ struct Execute {
     int order_id; // Order ID
     bool is_buy;    // is_buy = true means buy order is passive
     int size;
-    double price; // Price at which the order was executed
 };
 
 struct Cancel {

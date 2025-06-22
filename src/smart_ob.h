@@ -4,6 +4,8 @@
 #include <callback.h>
 #include <cmath>
 #include <deque>
+#include <functional>
+#include <iostream>
 #include <limits>
 #include <ob.h>
 #include <stream_msg.h>
@@ -44,17 +46,16 @@ struct L3SmartPriceLevel : L3PriceLevel {
                 should_cancel_qty -= order.size;
             }
         }
-        if (qty > l2_qty) {
-            int guessed_qty = qty - l2_qty;
+        if (l2_qty > qty) {
+            int guessed_qty = l2_qty - qty;
             Order guessed_order{0, is_bid, guessed_qty, price};
             orders.push_back(guessed_order);
         }
 
         // remove the trades from behind
-        auto trade_remaining_qty =
-            total_unconfirmed_trade_qty;
+        auto trade_remaining_qty = total_unconfirmed_trade_qty;
         while (!orders.empty() && trade_remaining_qty > 0) {
-            if (orders.back().size <= total_unconfirmed_trade_qty) {
+            if (orders.back().size <= trade_remaining_qty) {
                 trade_remaining_qty -= orders.back().size;
                 orders.pop_back();
             } else {
@@ -67,9 +68,16 @@ struct L3SmartPriceLevel : L3PriceLevel {
 
     std::string ToString() const {
         std::string result = std::to_string(price);
+        // result += "," + std::to_string(qty) + "," + std::to_string(l2_qty) +
+        //           "," + std::to_string(total_unconfirmed_trade_qty);
         result += ":[";
-        for (const auto &order : orders) {
-            result += std::to_string(order.size) + '@' + std::to_string(order.orderId);
+        bool flag = false;
+        for (const auto &order : GetOrders()) {
+            if (flag)
+                result += ", ";
+            flag = true;
+            result += std::to_string(order.size) + '@' +
+                      std::to_string(order.orderId);
         }
         result += "]";
         return result;
@@ -101,61 +109,104 @@ struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
 
     void UpdateL2(const Snapshot &snapshot) {
         if (snapshot.seq_id <= last_l2_seq_id) {
-            // Ignore updates that are older than the last L3 update
+            // Ignore updates that are older than the last l2/l3 update
             return;
         }
 
-        if (snapshot.seq_id > last_trade_ask_id) {
-            auto best_ask = snapshot.asks.empty()
-                                ? std::numeric_limits<double>::max()
-                                : snapshot.asks.front().price;
-            RemoveLevel(false, best_ask);
-            last_l2_best_ask = best_ask;
+        std::vector<std::function<void()>> cb;
+
+        // TODO: change to pointer, no need to binary search...
+        for (auto &[p, l] : bids) {
+            if (!std::binary_search(snapshot.bids.begin(), snapshot.bids.end(),
+                                    L2PriceLevel{p, 0},
+                                    [](const auto &a, const auto &b) {
+                                        return a.price > b.price;
+                                    })) {
+
+                // the level is not in the snapshot, remove it
+                UpdateL2Level(snapshot.seq_id, 0, l, cb);
+                continue;
+            }
         }
-        if (snapshot.seq_id > last_trade_bid_id && !snapshot.bids.empty()) {
-            auto best_bid =
-                snapshot.bids.empty() ? 0 : snapshot.bids.front().price;
-            RemoveLevel(true, best_bid);
-            last_l2_best_bid = best_bid;
+        for (auto &[p, l] : asks) {
+            if (!std::binary_search(snapshot.asks.begin(), snapshot.asks.end(),
+                                    L2PriceLevel{p, 0},
+                                    [](const auto &a, const auto &b) {
+                                        return a.price < b.price;
+                                    })) {
+
+                // the level is not in the snapshot, remove it
+                UpdateL2Level(snapshot.seq_id, 0, l, cb);
+                continue;
+            }
         }
 
-        for (auto &l2_level : snapshot.asks) {
-            auto &level = GetOrAddLevel(false, l2_level.price);
-            UpdateL2Level(snapshot.seq_id, l2_level.quantity, level);
-        }
+        // std::cout << "### " << bids.count(100.0) << std::endl;
+        // std::cout << "###"; for (auto &[k, v]: bids) std::cout << k << " ";
+        // std::cout << std::endl;
+
         for (auto &l2_level : snapshot.bids) {
             auto &level = GetOrAddLevel(true, l2_level.price);
-            UpdateL2Level(snapshot.seq_id, l2_level.quantity, level);
+            // std::cout << "<<<< " << level.price << " " << level.qty << "," <<
+            // level.l2_qty << std::endl;
+            UpdateL2Level(snapshot.seq_id, l2_level.qty, level, cb);
+            // std::cout << "<<<< " << level.price << " " << level.qty << "," <<
+            // level.l2_qty << std::endl;
+        }
+        for (auto &l2_level : snapshot.asks) {
+            auto &level = GetOrAddLevel(false, l2_level.price);
+            // std::cout << "<<<< " << level.price << " " << level.qty << "," <<
+            // level.l2_qty << std::endl;
+            UpdateL2Level(snapshot.seq_id, l2_level.qty, level, cb);
+            // std::cout << "<<<< " << level.price << " " << level.qty << "," <<
+            // level.l2_qty << std::endl;
         }
 
         last_l2_seq_id = snapshot.seq_id;
+
+        // trigger the callbacks at the end
+        for (auto &f : cb) {
+            f();
+        }
     }
 
-    void UpdateL2Level(int seq_id, int l2_qty, L3SmartPriceLevel &level) {
+    void UpdateL2Level(int seq_id, int l2_qty, L3SmartPriceLevel &level,
+                       std::vector<std::function<void()>> &cb) {
         assert(seq_id > last_l3_seq_id);
 
         int delta = l2_qty - level.l2_qty;
+        auto price = level.price;
+        auto is_bid = level.is_bid;
 
         if (delta > 0) {
-            // OnOrderAdd(delta, level.price, level.is_bid);
-            callback->onOrderAdd(
-                *this, OrderInfo{0, level.is_bid, delta, level.price});
+            cb.push_back([=, this] {
+                callback->onOrderAdd(*this, OrderInfo{0, is_bid, delta, price});
+            });
 
         } else {
             if (seq_id <= std::max(last_trade_ask_id, last_trade_bid_id)) {
                 // the change between last l2 update and this one is fully due
                 // to canceling OnOrderCancel(-delta, level.price,
                 // level.is_bid);
+                if (delta)
+                    cb.push_back([=, this] {
+                        callback->onOrderCancel(
+                            *this, OrderInfo{0, is_bid, -delta, price});
+                    });
             } else {
                 // there may be trade between last l2 update and this one,
                 // try to guess the cancel and exec qty
                 int exec_qty = std::abs(delta) * EXEC_RATIO -
                                level.total_unconfirmed_trade_qty;
                 int cancel_qty = std::abs(delta) - exec_qty;
-                callback->onOrderExecution(
-                    *this, OrderInfo{0, level.is_bid, exec_qty, level.price});
-                callback->onOrderCancel(
-                    *this, OrderInfo{0, level.is_bid, cancel_qty, level.price});
+                cb.push_back([=, this] {
+                    if (exec_qty)
+                        callback->onOrderExecution(
+                            *this, OrderInfo{0, is_bid, exec_qty, price});
+                    if (cancel_qty)
+                        callback->onOrderCancel(
+                            *this, OrderInfo{0, is_bid, cancel_qty, price});
+                });
             }
             // NOTE: there maybe additional ADD + CANCEL pairs between these,
             // but there's no point to send them at this point...
@@ -192,8 +243,8 @@ struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
                     using T = std::decay_t<decltype(arg)>;
                     if constexpr (std::is_same_v<T, level3::Execute>) {
                         callback->onOrderExecution(
-                            *this, OrderInfo{arg.order_id, arg.is_buy, arg.size,
-                                             arg.price});
+                            *this,
+                            OrderInfo{arg.order_id, arg.is_buy, arg.size, 0});
                     } else if constexpr (std::is_same_v<T, level3::Modify>) {
                         callback->onOrderModify(
                             *this, OrderInfo{arg.order_id, arg.is_buy, arg.size,
@@ -204,8 +255,7 @@ struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
                                                        arg.size, arg.price});
                     } else if constexpr (std::is_same_v<T, level3::Cancel>) {
                         callback->onOrderCancel(
-                            *this,
-                            OrderInfo{arg.order_id, arg.is_buy, 0, 0});
+                            *this, OrderInfo{arg.order_id, arg.is_buy, 0, 0});
                     } else {
                         assert(false && "Unknown message type");
                     }
@@ -272,7 +322,7 @@ struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
             return;
         }
 
-        CancelLevels(trade.is_buy, trade.price, true);
+        CancelLevels(trade.is_buy, trade.price, false);
 
         // update the price level's traded list, and trigger the
         // OnOrderExecution callback
@@ -280,17 +330,21 @@ struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
         level.unconfirmed_trades.push_back(trade);
         level.total_unconfirmed_trade_qty += trade.size;
         (trade.is_buy ? last_trade_bid_id : last_trade_ask_id) = trade.seq_id;
+        callback->onOrderExecution(
+            *this, OrderInfo{0, trade.is_buy, trade.size, trade.price});
     }
 
     std::string ToString() const {
         std::string result;
         result += "BID:\n";
         for (const auto &[price, level] : bids) {
-            result += level.ToString() + "\n";
+            if (!level.GetOrders().empty())
+                result += level.ToString() + "\n";
         }
         result += "ASK:\n";
         for (const auto &[price, level] : asks) {
-            result += level.ToString() + "\n";
+            if (!level.GetOrders().empty())
+                result += level.ToString() + "\n";
         }
         return result;
     }
@@ -302,7 +356,8 @@ struct SmartL3Book : private L3BookImpl<L3SmartPriceLevel> {
         for (const auto &[price, level] : asks) {
             level.DebugCheck();
         }
-        assert(!bids.empty() || !asks.empty() || bids.begin()->first < asks.begin()->first);
+        assert(!bids.empty() || !asks.empty() ||
+               bids.begin()->first < asks.begin()->first);
     }
 
   private:
