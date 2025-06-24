@@ -59,3 +59,7 @@ the levels close to the top of the book are at the end of the vector.
 for book insert / delete, just use std::vector's insert, delete, only the levels behind this level where moved.
 
 since in real world, orderbook usually change near top of the book, this will perform better than `std::map`
+
+`std::list<Order>` can be replaced with intrusive list, to remove one layer of indirection.
+
+allocation of layers / orders struct can use memory pool
